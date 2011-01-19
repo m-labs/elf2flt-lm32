@@ -58,6 +58,8 @@ const char *elf2flt_progname;
 #include "cygwin-elf.h"	/* Cygwin uses a local copy */
 #elif defined(TARGET_microblaze)
 #include <elf/microblaze.h>	/* TARGET_* ELF support for the BFD library */
+#elif defined(TARGET_lm32)
+#include <elf/lm32.h>
 #else
 #include <elf.h>      /* TARGET_* ELF support for the BFD library            */
 #endif
@@ -107,6 +109,11 @@ const char *elf2flt_progname;
 #define ARCH	"nios"
 #elif defined(TARGET_nios2)
 #define ARCH	"nios2"
+#elif defined(TARGET_lm32)
+#define ARCH	"lm32"
+#define FLAT_LM32_RELOC_TYPE_32_BIT   0
+#define FLAT_LM32_RELOC_TYPE_HI16_BIT 1
+#define FLAT_LM32_RELOC_TYPE_LO16_BIT 2
 #else
 #error "Don't know how to support your CPU architecture??"
 #endif
@@ -335,7 +342,7 @@ output_relocs (
   int			bad_relocs = 0;
   asymbol		**symb;
   long			nsymb;
-#ifdef TARGET_bfin
+#if defined (TARGET_bfin) || defined (TARGET_lm32)
   unsigned long		persistent_data = 0;
 #endif
   
@@ -645,6 +652,36 @@ dump_symbols(symbols, number_of_symbols);
 				case R_ARM_PLT32:
 				case R_ARM_GOTPC:
 				case R_ARM_GOT32:
+					relocation_needed = 0;
+					break;
+				default:
+					goto bad_resolved_reloc;
+#elif defined(TARGET_lm32)
+				case R_LM32_HI16:
+				case R_LM32_LO16:
+					if (q->howto->type == R_LM32_HI16) {
+						pflags = FLAT_LM32_RELOC_TYPE_HI16_BIT << 29;
+					} else {
+						pflags = FLAT_LM32_RELOC_TYPE_LO16_BIT << 29;
+					}
+
+					relocation_needed = 1;
+
+					/* remember the upper 16 bits */
+				    if ((0xffff0000 & sym_addr) != persistent_data) {
+						flat_relocs = (uint32_t *)
+							(realloc (flat_relocs, (flat_reloc_count + 1) * sizeof (uint32_t)));
+						if (verbose)
+							printf ("New persistent data for %08lx\n", sym_addr);
+						persistent_data = 0xffff0000 & sym_addr;
+						flat_relocs[flat_reloc_count++] = (sym_addr >> 16) | (3 << 29);
+					}
+					break;
+				case R_LM32_32:
+					pflags = FLAT_LM32_RELOC_TYPE_32_BIT << 29;
+					relocation_needed = 1;
+					break;
+				case R_LM32_CALL:
 					relocation_needed = 0;
 					break;
 				default:
@@ -1344,6 +1381,63 @@ DIS29_RELOCATION:
 #undef _30BITS_RELOC
 #undef _28BITS_RELOC
 #endif
+#ifdef TARGET_lm32
+				case R_LM32_32:
+				{	
+					pflags = FLAT_LM32_RELOC_TYPE_32_BIT << 29;
+					sym_vma = bfd_section_vma(abs_bfd, sym_section);
+					sym_addr += sym_vma + q->addend;
+					relocation_needed = 1;
+					break;
+				}
+				case R_LM32_CALL:
+				{
+					sym_vma = 0;
+					sym_addr += sym_vma + q->addend;
+					sym_addr -= q->address;
+					sym_addr = (int32_t)sym_addr >> q->howto->rightshift;
+
+					if ((int32_t)sym_addr < -0x8000000 || (int32_t)sym_addr > 0x7ffffff) {
+						printf("ERROR: Relocation overflow for R_LM32_CALL relocation against %s\n", sym_name);
+						bad_relocs++;
+						continue;
+					}
+
+					r_mem[0] |= (sym_addr >> 24) & 0x03;
+					r_mem[1] = (sym_addr >> 16) & 0xff;
+					r_mem[2] = (sym_addr >> 8) & 0xff;
+					r_mem[3] = sym_addr & 0xff;
+					break;
+				}
+				case R_LM32_HI16:
+				case R_LM32_LO16:
+				{
+					if (q->howto->type == R_LM32_HI16) {
+						pflags = FLAT_LM32_RELOC_TYPE_HI16_BIT << 29;
+					} else {
+						pflags = FLAT_LM32_RELOC_TYPE_LO16_BIT << 29;
+					}
+
+					sym_vma = bfd_section_vma(abs_bfd, sym_section);
+					sym_addr += sym_vma + q->addend;
+
+					relocation_needed = 1;
+
+					/* remember the upper 16 bits */
+				    if ((0xffff0000 & sym_addr) != persistent_data) {
+						flat_relocs = (uint32_t *)
+							(realloc (flat_relocs, (flat_reloc_count + 1) * sizeof (uint32_t)));
+						if (verbose)
+							printf ("New persistent data for %08lx\n", sym_addr);
+						persistent_data = 0xffff0000 & sym_addr;
+						flat_relocs[flat_reloc_count++] = (sym_addr >> 16) | (3 << 29);
+					}
+
+					r_mem[2] = (sym_addr >> 8) & 0xff;
+					r_mem[3] = sym_addr & 0xff;
+					break;
+				}
+#endif /* TARGET_lm32 */
 				default:
 					/* missing support for other types of relocs */
 					printf("ERROR: bad reloc type %d\n", (*p)->howto->type);
@@ -1481,6 +1575,13 @@ DIS29_RELOCATION:
 					break;
 #endif
 
+#ifdef TARGET_lm32
+				case R_LM32_HI16:
+				case R_LM32_LO16:
+				case R_LM32_CALL:
+					/* entry has already been written */
+					break;
+#endif
 				default:
 					/* The alignment of the build host
 					   might be stricter than that of the
